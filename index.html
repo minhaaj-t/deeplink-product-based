@@ -6,15 +6,20 @@
   <title>Opening Rawabi Shopping…</title>
   <script>
     /**
-     * Smart link: desktop → product web URL; mobile → app when possible, else store.
+     * Smart link: desktop → product web; mobile → app when the OS/app allows it.
      *
-     * iOS: Set IOS_APP_URL to your app’s custom URL scheme + path (must match the native app).
-     *      If unknown, ask your mobile team for the scheme used for product deep links.
+     * Why links often "don't open the app":
+     * - Android App Links need https://rawabihypermarket.com/.well-known/assetlinks.json
+     *   and matching intent filters in the app (package com.app.rawabi).
+     * - iOS Universal Links need apple-app-site-association on the same host.
+     * Without those, only a correct custom URL scheme from your native app will work.
      *
-     * Android: Uses an intent:// URL so Chrome can open the app if it handles the same
-     *          https://rawabihypermarket.com/... link (App Links). Otherwise Play Store.
+     * This page tries, in order: HTTPS product URL (best for verified domains), then
+     * custom-scheme intents / URLs, with configurable fallbacks.
      */
     (function () {
+      var BRIDGE_HOST = window.location.hostname;
+
       var CONFIG = {
         productWebUrl:
           "https://rawabihypermarket.com/Zelo-Fleece-Blanket-200X230-Sy2/25512",
@@ -23,10 +28,23 @@
           "https://play.google.com/store/apps/details?id=com.app.rawabi",
         appStoreUrl:
           "https://apps.apple.com/qa/app/rawabi-shopping/id6480009147",
-        /** Example: "rawabi://product/25512" — replace with your real scheme + path from the iOS app. */
-        iosAppUrl: "rawabi://product/25512",
+        /**
+         * Custom schemes to try (must match the native app). Order matters.
+         * Replace if your team uses different paths (e.g. rawabi://open?productId=).
+         */
+        customSchemeUrls: [
+          "rawabi://product/25512",
+          "com.app.rawabi://product/25512",
+          "rawabihypermarket://product/25512",
+        ],
         androidPackage: "com.app.rawabi",
-        iosFallbackDelayMs: 1800,
+        /** Android intent fallback: "web" = product page in browser, "store" = Play Store */
+        androidIntentFallback: "web",
+        /** iOS: after HTTPS + custom schemes, open App Store if still on this page */
+        iosOpenAppStoreIfStillHere: true,
+        iosAppStoreDelayMs: 2800,
+        /** Delay before trying custom schemes after HTTPS (ms); avoid racing Safari navigation */
+        iosCustomSchemeDelayMs: 1600,
       };
 
       function extractProductIdFromPath(webUrl) {
@@ -37,6 +55,14 @@
         } catch (e) {
           return null;
         }
+      }
+
+      function buildCustomSchemeUrls(productId) {
+        return [
+          "rawabi://product/" + productId,
+          "com.app.rawabi://product/" + productId,
+          "rawabihypermarket://product/" + productId,
+        ];
       }
 
       function parseOverrides() {
@@ -53,7 +79,10 @@
         if (!id) id = extractProductIdFromPath(CONFIG.productWebUrl);
         if (id) {
           CONFIG.productId = id;
-          CONFIG.iosAppUrl = "rawabi://product/" + id;
+          CONFIG.customSchemeUrls = buildCustomSchemeUrls(id);
+        }
+        if (q.get("androidFallback") === "store") {
+          CONFIG.androidIntentFallback = "store";
         }
       }
 
@@ -62,41 +91,153 @@
       }
 
       function isIOS(ua) {
-        return /iPhone|iPad|iPod/i.test(ua);
+        return (
+          /iPhone|iPad|iPod/i.test(ua) ||
+          (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+        );
       }
 
-      function buildAndroidIntent(webUrl, pkg, playStoreUrl) {
+      function stillOnBridgePage() {
+        return window.location.hostname === BRIDGE_HOST;
+      }
+
+      function androidFallbackEncoded() {
+        var u =
+          CONFIG.androidIntentFallback === "store"
+            ? CONFIG.playStoreUrl
+            : CONFIG.productWebUrl;
+        return encodeURIComponent(u);
+      }
+
+      /**
+       * Chrome intent: open app via App Links (https) or fall back.
+       * @see https://developer.chrome.com/docs/android/intents
+       */
+      function buildAndroidIntentHttps(webUrl, pkg) {
         var parsed;
         try {
           parsed = new URL(webUrl);
         } catch (e) {
-          window.location.replace(webUrl);
-          return;
+          return null;
         }
         var host = parsed.hostname;
         var pathname = parsed.pathname || "/";
-        var encodedPath =
-          pathname
-            .split("/")
-            .filter(function (seg) {
-              return seg.length > 0;
-            })
-            .map(function (seg) {
-              return encodeURIComponent(seg);
-            })
-            .join("/");
+        var encodedPath = pathname
+          .split("/")
+          .filter(function (seg) {
+            return seg.length > 0;
+          })
+          .map(function (seg) {
+            return encodeURIComponent(seg);
+          })
+          .join("/");
         var pathPart = encodedPath ? "/" + encodedPath : "";
         var intentPath =
           "intent://" + host + pathPart + (parsed.search || "");
-        var fallback = encodeURIComponent(playStoreUrl);
         return (
           intentPath +
           "#Intent;scheme=https;package=" +
           pkg +
           ";S.browser_fallback_url=" +
-          fallback +
+          androidFallbackEncoded() +
           ";end"
         );
+      }
+
+      /**
+       * Many RN/Flutter apps only register a custom scheme (not verified https).
+       * intent://product/{id}#Intent;scheme=rawabi;package=...
+       */
+      function buildAndroidIntentCustomScheme(productId, pkg, schemeName) {
+        schemeName = schemeName || "rawabi";
+        return (
+          "intent://product/" +
+          encodeURIComponent(productId) +
+          "#Intent;scheme=" +
+          schemeName +
+          ";package=" +
+          pkg +
+          ";S.browser_fallback_url=" +
+          androidFallbackEncoded() +
+          ";end"
+        );
+      }
+
+      function tryIframe(url) {
+        var el = document.createElement("iframe");
+        el.style.display = "none";
+        el.style.width = "0";
+        el.style.height = "0";
+        el.setAttribute("src", url);
+        document.documentElement.appendChild(el);
+        setTimeout(function () {
+          try {
+            el.remove();
+          } catch (e) {}
+        }, 2000);
+      }
+
+      function openIOSDeepLinks() {
+        var schemes = CONFIG.customSchemeUrls;
+        for (var i = 0; i < schemes.length; i++) {
+          tryIframe(schemes[i]);
+        }
+        if (schemes.length) {
+          window.location.href = schemes[0];
+        }
+      }
+
+      function scheduleIOS() {
+        var store = CONFIG.appStoreUrl;
+        var productUrl = CONFIG.productWebUrl;
+        var pageHidden = false;
+        document.addEventListener(
+          "visibilitychange",
+          function () {
+            if (document.hidden) pageHidden = true;
+          },
+          { once: true }
+        );
+
+        // 1) Universal Link: same https URL as the site (works if AASA is on rawabihypermarket.com)
+        setTimeout(function () {
+          window.location.href = productUrl;
+        }, 0);
+
+        // 2) Custom schemes (if Universal Link did not leave this page in time)
+        setTimeout(function () {
+          if (!stillOnBridgePage() || pageHidden) return;
+          openIOSDeepLinks();
+        }, CONFIG.iosCustomSchemeDelayMs);
+
+        // 3) App Store only if still stuck on bridge (no app / scheme)
+        if (CONFIG.iosOpenAppStoreIfStillHere) {
+          setTimeout(function () {
+            if (!stillOnBridgePage() || pageHidden) return;
+            window.location.replace(store);
+          }, CONFIG.iosAppStoreDelayMs);
+        }
+      }
+
+      function scheduleAndroid() {
+        var pkg = CONFIG.androidPackage;
+        var pid = CONFIG.productId;
+        var intentHttps = buildAndroidIntentHttps(CONFIG.productWebUrl, pkg);
+        var intentRawabi = buildAndroidIntentCustomScheme(pid, pkg, "rawabi");
+
+        // Defer so the document is committed (some WebViews block instant redirects)
+        setTimeout(function () {
+          tryIframe(intentRawabi);
+        }, 0);
+
+        setTimeout(function () {
+          // Prefer https App Links intent; rawabi custom intent tried via iframe above
+          if (intentHttps) {
+            window.location.href = intentHttps;
+          } else {
+            window.location.href = CONFIG.productWebUrl;
+          }
+        }, 50);
       }
 
       parseOverrides();
@@ -109,32 +250,12 @@
       }
 
       if (isAndroid(ua)) {
-        var intent = buildAndroidIntent(
-          CONFIG.productWebUrl,
-          CONFIG.androidPackage,
-          CONFIG.playStoreUrl
-        );
-        if (intent) {
-          window.location.replace(intent);
-        }
+        scheduleAndroid();
         return;
       }
 
       if (isIOS(ua)) {
-        var store = CONFIG.appStoreUrl;
-        var appUrl = CONFIG.iosAppUrl;
-        var pageHidden = false;
-        document.addEventListener(
-          "visibilitychange",
-          function () {
-            if (document.hidden) pageHidden = true;
-          },
-          { once: true }
-        );
-        window.location.replace(appUrl);
-        setTimeout(function () {
-          if (!pageHidden) window.location.replace(store);
-        }, CONFIG.iosFallbackDelayMs);
+        scheduleIOS();
       }
     })();
   </script>
@@ -142,7 +263,7 @@
 <body>
   <noscript>
     <p>
-      <a id="fallback" href="https://rawabihypermarket.com/Zelo-Fleece-Blanket-200X230-Sy2/25512"
+      <a href="https://rawabihypermarket.com/Zelo-Fleece-Blanket-200X230-Sy2/25512"
         >Continue to product</a
       >
     </p>
