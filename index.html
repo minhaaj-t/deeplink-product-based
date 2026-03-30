@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Opening Rawabi Shopping…</title>
+  <script>
+    /**
+     * Smart link: desktop → product web URL; mobile → app when possible, else store.
+     *
+     * iOS: Set IOS_APP_URL to your app’s custom URL scheme + path (must match the native app).
+     *      If unknown, ask your mobile team for the scheme used for product deep links.
+     *
+     * Android: Uses an intent:// URL so Chrome can open the app if it handles the same
+     *          https://rawabihypermarket.com/... link (App Links). Otherwise Play Store.
+     */
+    (function () {
+      var CONFIG = {
+        productWebUrl:
+          "https://rawabihypermarket.com/Zelo-Fleece-Blanket-200X230-Sy2/25512",
+        productId: "25512",
+        playStoreUrl:
+          "https://play.google.com/store/apps/details?id=com.app.rawabi",
+        appStoreUrl:
+          "https://apps.apple.com/qa/app/rawabi-shopping/id6480009147",
+        /** Example: "rawabi://product/25512" — replace with your real scheme + path from the iOS app. */
+        iosAppUrl: "rawabi://product/25512",
+        androidPackage: "com.app.rawabi",
+        iosFallbackDelayMs: 1800,
+      };
+
+      function extractProductIdFromPath(webUrl) {
+        try {
+          var p = new URL(webUrl).pathname.replace(/\/+$/, "");
+          var last = p.split("/").pop();
+          return last && /^\d+$/.test(last) ? last : null;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function parseOverrides() {
+        var q = new URLSearchParams(window.location.search);
+        var u = q.get("url") || q.get("u");
+        if (u) {
+          try {
+            CONFIG.productWebUrl = decodeURIComponent(u);
+          } catch (e) {
+            CONFIG.productWebUrl = u;
+          }
+        }
+        var id = q.get("id") || q.get("productId");
+        if (!id) id = extractProductIdFromPath(CONFIG.productWebUrl);
+        if (id) {
+          CONFIG.productId = id;
+          CONFIG.iosAppUrl = "rawabi://product/" + id;
+        }
+      }
+
+      function isAndroid(ua) {
+        return /android/i.test(ua);
+      }
+
+      function isIOS(ua) {
+        return /iPhone|iPad|iPod/i.test(ua);
+      }
+
+      function buildAndroidIntent(webUrl, pkg, playStoreUrl) {
+        var parsed;
+        try {
+          parsed = new URL(webUrl);
+        } catch (e) {
+          window.location.replace(webUrl);
+          return;
+        }
+        var host = parsed.hostname;
+        var pathname = parsed.pathname || "/";
+        var encodedPath =
+          pathname
+            .split("/")
+            .filter(function (seg) {
+              return seg.length > 0;
+            })
+            .map(function (seg) {
+              return encodeURIComponent(seg);
+            })
+            .join("/");
+        var pathPart = encodedPath ? "/" + encodedPath : "";
+        var intentPath =
+          "intent://" + host + pathPart + (parsed.search || "");
+        var fallback = encodeURIComponent(playStoreUrl);
+        return (
+          intentPath +
+          "#Intent;scheme=https;package=" +
+          pkg +
+          ";S.browser_fallback_url=" +
+          fallback +
+          ";end"
+        );
+      }
+
+      parseOverrides();
+
+      var ua = navigator.userAgent || "";
+
+      if (!isAndroid(ua) && !isIOS(ua)) {
+        window.location.replace(CONFIG.productWebUrl);
+        return;
+      }
+
+      if (isAndroid(ua)) {
+        var intent = buildAndroidIntent(
+          CONFIG.productWebUrl,
+          CONFIG.androidPackage,
+          CONFIG.playStoreUrl
+        );
+        if (intent) {
+          window.location.replace(intent);
+        }
+        return;
+      }
+
+      if (isIOS(ua)) {
+        var store = CONFIG.appStoreUrl;
+        var appUrl = CONFIG.iosAppUrl;
+        var pageHidden = false;
+        document.addEventListener(
+          "visibilitychange",
+          function () {
+            if (document.hidden) pageHidden = true;
+          },
+          { once: true }
+        );
+        window.location.replace(appUrl);
+        setTimeout(function () {
+          if (!pageHidden) window.location.replace(store);
+        }, CONFIG.iosFallbackDelayMs);
+      }
+    })();
+  </script>
+</head>
+<body>
+  <noscript>
+    <p>
+      <a id="fallback" href="https://rawabihypermarket.com/Zelo-Fleece-Blanket-200X230-Sy2/25512"
+        >Continue to product</a
+      >
+    </p>
+  </noscript>
+</body>
+</html>
